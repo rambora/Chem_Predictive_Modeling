@@ -8,16 +8,9 @@ rm(list=ls())
 #-----------------------------------------------------------------
 
 library(QSARdata)
-#library(rcdk)
 library(dplyr)
-library(ggplot2)
-library(gridExtra)
 library(mlr)
 library(corrplot)
-library(caret)
-library(pls)
-library(MASS)
-library(glmnet)
 # ------------- Data Loading, Processing and Task Preparation ----------------
 data(AquaticTox)
 
@@ -80,8 +73,6 @@ for (i in (20:32)){
 
 # This suggests 'normalization and BoxCox transformations' are required
 #-----------------------------------------------------------
-# carrying out the modeling with 'caret' package as 'mlr' doesnot
-# have 'Lasso and Ridge regression' implemented
 #-----------------------------------------------------------
 train <- sample_frac(AT_full_filter, 0.8, replace=TRUE)
 rid <- as.numeric(rownames(train))
@@ -92,70 +83,65 @@ test <- test[,-1]
 summarizeColumns(train)
 
 #---------------------------------------------------------------
-trainControl <- trainControl(method='CV', number=10)
+trainTask <- makeRegrTask(data=train, target='Activity')
+testTask <- makeRegrTask(data=test, target='Activity')
+trainTask <- normalizeFeatures(trainTask, method='standardize')
+testTask <- normalizeFeatures(testTask, method='standardize')
 
-# Benchmarks
-set.seed(3)
-fit.lm <- train(Activity~., data=train, method = 'lm', metric='RMSE', 
-                preProc= c('center','scale','BoxCox'), trControl=trainControl)
+lrns <- list(makeLearner(id='lm',      'regr.lm', predict.type = 'response'),
+             makeLearner(id='plsr',    'regr.plsr',predict.type = 'response'),
+             makeLearner(id='glmnet',  'regr.glmnet',predict.type = 'response'),
+             makeLearner(id='ksvm',    'regr.ksvm', predict.type = 'response'),
+             makeLearner(id='nnet',    'regr.nnet', predict.type = 'response'),
+             makeLearner(id='rf',      'regr.randomForest', predict.type = 'response'),
+             makeLearner(id='gbm',     'regr.gbm', predict.type = 'response'),
+             makeLearner(id='xgb',     'regr.xgboost', predict.type = 'response')
+)
 
-set.seed(3)
-fit.pls <- train(Activity~., data=train, method = 'pls', metric='RMSE', 
-                preProc= c('center','scale','BoxCox'), trControl=trainControl)
+rdesc <- makeResampleDesc(method='CV', iter=10, stratify = FALSE)
+bmr <- benchmark(lrns, trainTask, rdesc)
+bmr
+#-----------------------------------------------------------
+#---------------------- Training & Predicting --------------
+listMeasures('regr')
+svm_lrn <- makeLearner(id='svm', 'regr.ksvm', predict.type='response')
+rf_lrn <- makeLearner(id='svm', 'regr.randomForest', predict.type='response')
 
-# set.seed(3)
-# fit.glmnet <- train(Activity~., data=train, method = 'glmnet', metric='RMSE', 
-#                 preProc= c('center','scale','BoxCox'), trControl=trainControl)
+svm_model <- train(svm_lrn, trainTask)
+rf_model <- train(rf_lrn, trainTask)
 
-set.seed(3)
-fit.svm <- train(Activity~., data=train, method = 'svmRadial', metric='RMSE', 
-                preProc= c('center','scale','BoxCox'), trControl=trainControl)
+svm_pred <- predict(svm_model, testTask)
+rf_pred <- predict(rf_model, testTask)
 
-set.seed(3)
-grid1 <- expand.grid(.cp=c(0,0.05,0.1))
-fit.cart <- train(Activity~., data=train, method = 'rpart', metric='RMSE', tuneGrid=grid1, 
-                preProc= c('center','scale','BoxCox'), trControl=trainControl)
+performance(svm_pred, measures=list(mse,rmse,rsq,arsq))
+performance(rf_pred, measures=list(mse,rmse,rsq,arsq))
+#-------------------------------------------------------------
+#------------------------ Tuning SVM -------------------------
+getParamSet('regr.ksvm')
+?makeParamSet
+ps.svm <- makeParamSet(
+  makeDiscreteParam("C", values = seq(0,5,by=0.1)), #cost parameters
+  makeDiscreteParam("sigma", values = seq(0,5,by=0.1)) #RBF Kernel Parameter
+)
 
-set.seed(3)
-mtry <- sqrt(ncol(train))
-grid2 <- expand.grid(.mtry=mtry)
-fit.rf <- train(Activity~., data=train, method = 'rf', metric='RMSE', tuneGrid=grid2, 
-                  preProc= c('center','scale','BoxCox'), trControl=trainControl)
-set.seed(3)
-fit.knn <- train(Activity~., data=train, method = 'knn', metric='RMSE', 
-                preProc= c('center','scale','BoxCox'), trControl=trainControl)
+rancontrol <- makeTuneControlRandom(maxit = 100L)
+tune_svm <- tuneParams(svm_lrn, trainTask, rdesc, par.set=ps.svm, control=rancontrol)
+svm_tuned <- setHyperPars(svm_lrn,par.vals=tune_svm$x)
 
-# Compare algorithms
-trans_results <- resamples(list(LM=fit.lm, PLS=fit.pls, SVM=fit.svm, DT=fit.cart,
-                               RF= fit.rf, KNN=fit.knn))
-summary(trans_results)
-dotplot(trans_results)
+svm_tune_model <- train(svm_tuned, trainTask)
+svm_tune_pred <- predict(svm_tune_model, testTask)
+performance(svm_tune_pred, measures=list(mse,rmse,rsq,arsq))
+#--------------------------------------------------------------
+#------------------------ Tuning RF ---------------------------
+getParamSet('regr.randomForest')
+ps.rf <- makeParamSet(
+  makeIntegerParam('ntree', lower=50, upper=500),
+  makeIntegerParam('mtry', lower=3, upper=10)
+)
+tune_rf <- tuneParams(rf_lrn, trainTask, rdesc, par.set=ps.rf, control=rancontrol)
+rf_tuned <- setHyperPars(rf_lrn, par.vals=tune_rf$x)
 
-# library(glmnet)
-# fit_1.glm <- glmnet(as.matrix(train[,-23]), as.vector(train[,23]), family='gaussian')
-# plot(fit_1.glm)
-# fit.glm <- cv.glmnet(as.matrix(train[,-23]), as.vector(train[,23]), nfolds=10, alpha=0.7, family='gaussian')
-# summary(fit.glm)
-# plot(fit.glm)
-# fit.glm$lambda.min
-# fit.glm$lambda.1se
-# coef(fit.glm, s=fit.glm$lambda.min)
-# par(mfrow=c(3,2))
-# plot(fit.glm)
-#------------------------------------------------------------
-# Tuning Random Forest
-rf_trainControl <- trainControl(method='repeatedcv', number=10, repeats=3, search='grid')
-set.seed(3)
-mtry <- sqrt(ncol(train))
-grid2 <- expand.grid(.mtry=mtry)
-fit.rf <- train(Activity~., data=train, method = 'rf', metric='RMSE', tuneGrid=grid2, 
-                preProc= c('center','scale','BoxCox'), trControl=rf_trainControl)
-print(fit.rf)
-
-# Prediction
-
-rf_predict <- predict(fit.rf, test) 
-summary(rf_predict)
-mse <- mean((test$Activity - rf_predict)^2)
-rmse <- sqrt(mse)
+rf_tuned_model <- train(rf_tuned, trainTask)
+rf_tuned_pred <- predict(rf_tuned_model, testTask)
+performance(rf_tuned_pred, measures=list(mse,rmse,rsq,arsq))
 #------------------------------------------------------------
